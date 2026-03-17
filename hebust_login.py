@@ -104,17 +104,102 @@ def _wait_for_content(page, timeout_s: int = 5) -> str:
     return ""
 
 # ─────────────────────────────────────────────
+#  工具：检测页面上是否存在可见按钮
+# ─────────────────────────────────────────────
+
+def _has_visible_button(page, selectors: list, timeout_ms: int = 300) -> bool:
+    """依次检测选择器列表，任意一个可见即返回 True。"""
+    for sel in selectors:
+        try:
+            if page.locator(sel).first.is_visible(timeout=timeout_ms):
+                return True
+        except Exception:
+            continue
+    return False
+
+# ─────────────────────────────────────────────
+#  按钮选择器常量
+# ─────────────────────────────────────────────
+
+LOGOUT_BUTTON_SELECTORS = [
+    'button:has-text("注销")',
+    'a:has-text("注销")',
+    'button:has-text("logout")',
+    'a:has-text("logout")',
+    'button:has-text("下线")',
+    'a:has-text("下线")',
+    '#logout-link',
+    '.logout-btn',
+]
+
+LOGIN_BUTTON_SELECTORS = [
+    'button[type="submit"]',
+    'input[type="submit"]',
+    'button:has-text("登录")',
+    'a:has-text("登录")',
+    '.login-btn',
+    '#login-account',
+    'button.btn-login',
+    'input[name="username"]',
+]
+
+# ─────────────────────────────────────────────
+#  状态检测
+# ─────────────────────────────────────────────
+
+def _check_already_online(playwright, headless: bool) -> bool:
+    """
+    访问注销页，若页面加载成功且存在注销按钮，则认为当前已联网。
+    """
+    from playwright.sync_api import TimeoutError as PWTimeout
+    browser, context = _new_browser_context(playwright, headless)
+    page = context.new_page()
+    try:
+        page.goto(LOGOUT_URL, timeout=10_000, wait_until="load")
+        _wait_for_content(page, timeout_s=3)
+        return _has_visible_button(page, LOGOUT_BUTTON_SELECTORS)
+    except Exception:
+        return False
+    finally:
+        browser.close()
+
+
+def _check_already_offline(playwright, headless: bool) -> bool:
+    """
+    访问登录页，若页面加载成功且存在登录按钮，则认为当前未联网。
+    """
+    from playwright.sync_api import TimeoutError as PWTimeout
+    browser, context = _new_browser_context(playwright, headless)
+    page = context.new_page()
+    try:
+        page.goto(LOGIN_URL, timeout=10_000, wait_until="load")
+        _wait_for_content(page, timeout_s=3)
+        return _has_visible_button(page, LOGIN_BUTTON_SELECTORS)
+    except Exception:
+        return False
+    finally:
+        browser.close()
+
+# ─────────────────────────────────────────────
 #  登录
 # ─────────────────────────────────────────────
 
 def login(username: str, password: str, headless: bool = HEADLESS_DEFAULT):
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-    print(f"[登录] 目标地址：{LOGIN_URL}")
-    print(f"[登录] 用户名：{username}")
-    print(f"[登录] 浏览器模式：{'无头(后台)' if headless else '显示窗口'}\n")
-
     with sync_playwright() as p:
+
+        # ── 预检：已联网则跳过 ─────────────────────────
+        print("[检测] 正在检测当前联网状态...")
+        if _check_already_online(p, headless):
+            print("[INFO] 当前已联网，无需登录。")
+            return True
+        print("  未检测到联网状态，继续执行登录。\n")
+
+        print(f"[登录] 目标地址：{LOGIN_URL}")
+        print(f"[登录] 用户名：{username}")
+        print(f"[登录] 浏览器模式：{'无头(后台)' if headless else '显示窗口'}\n")
+
         browser, context = _new_browser_context(p, headless)
         page = context.new_page()
 
@@ -122,7 +207,6 @@ def login(username: str, password: str, headless: bool = HEADLESS_DEFAULT):
         try:
             page.goto(LOGIN_URL, timeout=TIMEOUT_MS, wait_until="load")
         except PWTimeout:
-            # networkidle 超时后降级，继续尝试
             pass  # 降级忽略
 
         print("[步骤 2/4] 正在等待页面内容渲染...")
@@ -210,30 +294,14 @@ def login(username: str, password: str, headless: bool = HEADLESS_DEFAULT):
 
         print("[步骤 4/4] 等待登录结果...")
         # 出现注销按钮即视为登录成功
-        logout_confirm_selectors = [
-            'button:has-text("注销")',
-            'a:has-text("注销")',
-            'button:has-text("logout")',
-            'a:has-text("logout")',
-            'button:has-text("下线")',
-            'a:has-text("下线")',
-            '#logout-link',
-            '.logout-btn',
-        ]
         result = False
-        deadline = __import__('time').time() + 5
-        while __import__('time').time() < deadline:
-            for sel in logout_confirm_selectors:
-                try:
-                    if page.locator(sel).first.is_visible(timeout=300):
-                        print(f"\n[OK] 登录成功！（检测到注销按钮：{sel}）")
-                        result = True
-                        break
-                except Exception:
-                    continue
-            if result:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if _has_visible_button(page, LOGOUT_BUTTON_SELECTORS):
+                print("\n[OK] 登录成功！")
+                result = True
                 break
-            __import__('time').sleep(0.1)
+            time.sleep(0.1)
         if not result:
             page.screenshot(path="login_result.png")
             print("\n[FAIL] 登录失败或超时，截图已保存至 login_result.png，请人工确认。")
@@ -248,10 +316,18 @@ def login(username: str, password: str, headless: bool = HEADLESS_DEFAULT):
 def logout(headless: bool = HEADLESS_DEFAULT):
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-    print(f"[注销] 目标地址：{LOGOUT_URL}")
-    print(f"[注销] 浏览器模式：{'无头(后台)' if headless else '显示窗口'}\n")
-
     with sync_playwright() as p:
+
+        # ── 预检：未联网则跳过 ─────────────────────────
+        print("[检测] 正在检测当前联网状态...")
+        if _check_already_offline(p, headless):
+            print("[INFO] 当前未联网，无需注销。")
+            return True
+        print("  检测到当前已联网，继续执行注销。\n")
+
+        print(f"[注销] 目标地址：{LOGOUT_URL}")
+        print(f"[注销] 浏览器模式：{'无头(后台)' if headless else '显示窗口'}\n")
+
         browser, context = _new_browser_context(p, headless)
         page = context.new_page()
 
@@ -260,7 +336,6 @@ def logout(headless: bool = HEADLESS_DEFAULT):
         try:
             page.goto(LOGOUT_URL, timeout=TIMEOUT_MS, wait_until="load")
         except PWTimeout:
-            # networkidle 超时后降级，继续尝试
             pass  # 降级忽略
 
         # 等待页面出现实质内容（修复纯白 BUG 的核心）
@@ -342,30 +417,14 @@ def logout(headless: bool = HEADLESS_DEFAULT):
         # ── 5. 等待页面响应后判断结果 ─────────────────
         print("[步骤 3/3] 等待注销结果...")
         # 出现登录按钮即视为注销成功
-        login_confirm_selectors = [
-            'button[type="submit"]',
-            'input[type="submit"]',
-            'button:has-text("登录")',
-            'a:has-text("登录")',
-            '.login-btn',
-            '#login-account',
-            'button.btn-login',
-            'input[name="username"]',
-        ]
         result = False
-        deadline = __import__('time').time() + 5
-        while __import__('time').time() < deadline:
-            for sel in login_confirm_selectors:
-                try:
-                    if page.locator(sel).first.is_visible(timeout=300):
-                        print(f"\n[OK] 注销成功！（检测到登录按钮：{sel}）")
-                        result = True
-                        break
-                except Exception:
-                    continue
-            if result:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if _has_visible_button(page, LOGIN_BUTTON_SELECTORS):
+                print("\n[OK] 注销成功！")
+                result = True
                 break
-            __import__('time').sleep(0.1)
+            time.sleep(0.1)
         if not result:
             page.screenshot(path="logout_result.png")
             print("\n[FAIL] 注销失败或超时，截图已保存至 logout_result.png，请人工确认。")
@@ -379,7 +438,7 @@ def logout(headless: bool = HEADLESS_DEFAULT):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="河北科技大学校园网自动登录/注销工具 v11（Srun / Playwright）",
+        description="河北科技大学校园网自动登录/注销工具（Srun / Playwright）",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("-u", "--username", help="学号/账号")
@@ -421,8 +480,8 @@ def main():
 
     if not args.username or not args.password:
         print("[错误] 登录模式需要通过 -u 和 -p 参数传入账号与密码。")
-        print("  示例：python hebust_login_v11.py -u 你的学号 -p 你的密码")
-        print("  注销：python hebust_login_v11.py --logout")
+        print("  示例：python hebust_login.py -u 你的学号 -p 你的密码")
+        print("  注销：python hebust_login.py --logout")
         sys.exit(1)
 
     result = login(args.username, args.password, headless=headless)
