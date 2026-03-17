@@ -14,11 +14,11 @@ python hebust_login.py -u <学号> -p <密码>
 ```bash
 python python hebust_login.py --logout
 ```
-登录（显示浏览器窗口）：
+登录：（显示浏览器窗口）
 ```bash
 python hebust_login.py -u <学号> -p <密码> --show-browser
 ```
-注销（显示浏览器窗口）：
+注销：（显示浏览器窗口）
 ```bash
 python python hebust_login.py --logout --show-browser
 ```
